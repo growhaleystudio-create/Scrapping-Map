@@ -9,7 +9,7 @@ import { chromium } from 'playwright';
  * @returns {Promise<Array>} - Array of lead objects
  */
 export async function scrapeGoogleMaps(keyword, location, maxResults = 20) {
-    const searchQuery = `${keyword} di ${location}`;
+    const searchQuery = `${keyword} ${location}`;
     const results = [];
     const seenNames = new Set(); // Track duplicates
 
