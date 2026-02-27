@@ -1,46 +1,61 @@
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
-
-dotenv.config();
-
-import leadsRouter from './routes/leads.js';
-import scraperRouter from './routes/scraper.js';
-import exportRouter from './routes/export.js';
+import { scrapeGoogleMaps } from './scraper/google-maps.js';
+import { batchCheckWebsites } from './services/website-checker.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
-const corsOrigin = process.env.CORS_ORIGIN;
-app.use(cors({
-    origin: corsOrigin ? corsOrigin.split(',').map(s => s.trim()) : '*',
-    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-    credentials: true,
-}));
-app.use(express.json({ limit: '10mb' }));
+app.use(cors());
+app.use(express.json());
 
-// Routes
-app.use('/api/leads', leadsRouter);
-app.use('/api/scraper', scraperRouter);
-app.use('/api/export', exportRouter);
+// ============================================
+// POST /api/scrape - Scrape and return results directly
+// ============================================
+app.post('/api/scrape', async (req, res) => {
+    try {
+        const { keyword, location, maxResults = 20 } = req.body;
+
+        if (!keyword || !location) {
+            return res.status(400).json({ error: 'keyword and location are required' });
+        }
+
+        console.log(`\n🔍 Scraping: "${keyword}" di "${location}" (max: ${maxResults})`);
+
+        // Scrape Google Maps
+        const results = await scrapeGoogleMaps(keyword, location, maxResults);
+
+        // Check website statuses
+        const leadsWithUrls = results.filter(r => r.website_url);
+        if (leadsWithUrls.length > 0) {
+            console.log(`🌐 Checking ${leadsWithUrls.length} website statuses...`);
+            const statusResults = await batchCheckWebsites(leadsWithUrls);
+            statusResults.forEach(sr => {
+                const lead = results.find(r => r.website_url === sr.website_url);
+                if (lead) lead.website_status = sr.status;
+            });
+        }
+
+        // Add unique IDs
+        const leads = results.map((r, i) => ({
+            ...r,
+            id: `lead-${Date.now()}-${i}`,
+        }));
+
+        console.log(`✅ Done! Returning ${leads.length} leads\n`);
+        res.json({ leads, total: leads.length });
+    } catch (error) {
+        console.error('❌ Scrape error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
 
 // Health check
 app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-    });
+    res.json({ status: 'ok' });
 });
 
-// Start server
 app.listen(PORT, () => {
-    console.log(`\n🚀 Lead Finder API running on http://localhost:${PORT}`);
-    console.log(`   📊 Leads API:    http://localhost:${PORT}/api/leads`);
-    console.log(`   🔍 Scraper API:  http://localhost:${PORT}/api/scraper/start`);
-    console.log(`   📥 Export CSV:   http://localhost:${PORT}/api/export/csv`);
-    console.log(`   💚 Health Check: http://localhost:${PORT}/api/health\n`);
+    console.log(`\n🚀 Lead Finder API on http://localhost:${PORT}`);
+    console.log(`   Endpoint: POST http://localhost:${PORT}/api/scrape\n`);
 });
-
-export default app;

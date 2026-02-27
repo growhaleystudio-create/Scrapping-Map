@@ -1,93 +1,63 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import Header from './components/Header';
 import SearchForm from './components/SearchForm';
 import LeadsTable from './components/LeadsTable';
 import EmptyState from './components/EmptyState';
 import ScrapingProgress from './components/ScrapingProgress';
-import {
-  isConnected,
-  fetchLeads,
-  updateLeadStatus,
-  deleteLead,
-  exportCSV,
-} from './lib/api';
+import { scrapeLeads, checkHealth, downloadCSV } from './lib/api';
 
 const App = () => {
   const [leads, setLeads] = useState([]);
   const [isScraping, setIsScraping] = useState(false);
   const [showOnlyNoWebsite, setShowOnlyNoWebsite] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
-  const [dbConnected, setDbConnected] = useState(false);
+  const [serverOnline, setServerOnline] = useState(false);
   const [error, setError] = useState(null);
-  const [scrapingMessage, setScrapingMessage] = useState(null);
 
-  // Load leads from Supabase on mount
-  const loadLeads = useCallback(async () => {
-    try {
-      const connected = isConnected();
-      setDbConnected(connected);
-      if (!connected) return;
-
-      const data = await fetchLeads();
-      setLeads(data.leads || []);
-    } catch (err) {
-      console.error('Error loading leads:', err);
-      setError('Gagal memuat data leads.');
-    }
+  // Check if backend is running
+  useEffect(() => {
+    checkHealth().then(setServerOnline);
   }, []);
 
-  useEffect(() => {
-    loadLeads();
-  }, [loadLeads]);
-
-  // Handle scraping — triggers local CLI reminder
+  // Handle scraping — calls local backend, stores in React state
   const handleScrape = async (keyword, location, maxResults = 40) => {
-    setScrapingMessage({ keyword, location, maxResults });
-  };
-
-  const dismissScrapingMessage = () => {
-    setScrapingMessage(null);
-    loadLeads(); // Reload data after user runs CLI
-  };
-
-  // Handle status change
-  const handleStatusChange = async (id, newStatus) => {
-    // Optimistic update
-    setLeads(leads.map(lead => lead.id === id ? { ...lead, status: newStatus } : lead));
-
-    if (dbConnected) {
-      try {
-        await updateLeadStatus(id, newStatus);
-      } catch {
-        console.error('Failed to update status');
-        loadLeads(); // Revert on error
-      }
+    if (!serverOnline) {
+      setError('Backend belum jalan. Jalankan "npm run server" di terminal lain.');
+      return;
     }
-  };
 
-  // Handle delete
-  const handleDelete = async (id) => {
-    setLeads(leads.filter(lead => lead.id !== id));
+    setIsScraping(true);
+    setError(null);
 
-    if (dbConnected) {
-      try {
-        await deleteLead(id);
-      } catch {
-        console.error('Failed to delete lead');
-        loadLeads(); // Revert on error
-      }
-    }
-  };
-
-  // Handle export
-  const handleExport = async () => {
     try {
-      await exportCSV({
-        website_status: showOnlyNoWebsite ? 'none' : undefined,
-        status: statusFilter || undefined,
-      });
+      const data = await scrapeLeads(keyword, location, maxResults);
+      setLeads(prev => [...data.leads, ...prev]); // Prepend new results
     } catch (err) {
-      setError('Gagal export CSV: ' + err.message);
+      setError(err.message);
+    } finally {
+      setIsScraping(false);
+    }
+  };
+
+  // Handle status change (in-memory only)
+  const handleStatusChange = (id, newStatus) => {
+    setLeads(leads.map(lead => lead.id === id ? { ...lead, status: newStatus } : lead));
+  };
+
+  // Handle delete (in-memory only)
+  const handleDelete = (id) => {
+    setLeads(leads.filter(lead => lead.id !== id));
+  };
+
+  // Handle CSV export
+  const handleExport = () => {
+    downloadCSV(filteredLeads);
+  };
+
+  // Handle clear all
+  const handleClear = () => {
+    if (confirm('Hapus semua data dari tabel?')) {
+      setLeads([]);
     }
   };
 
@@ -106,37 +76,32 @@ const App = () => {
 
         <Header leadsCount={leads.length} onExport={handleExport} />
 
-        {/* DB Status Indicator */}
+        {/* Server Status */}
         <div className="flex items-center gap-2 text-xs text-gray-500">
-          <span className={`w-2 h-2 rounded-full ${dbConnected ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
-          {dbConnected ? `Terhubung ke Database — ${leads.length} leads tersimpan` : 'Database tidak terhubung'}
+          <span className={`w-2 h-2 rounded-full ${serverOnline ? 'bg-emerald-500' : 'bg-red-500'}`}></span>
+          {serverOnline ? 'Scraper engine siap' : 'Scraper offline — jalankan: npm run server'}
+          {leads.length > 0 && (
+            <span className="ml-auto text-gray-400">
+              {leads.length} leads di-memory •
+              <button onClick={handleClear} className="text-red-400 hover:text-red-600 ml-1 cursor-pointer">
+                Hapus semua
+              </button>
+            </span>
+          )}
         </div>
 
         <SearchForm onSearch={handleScrape} isScraping={isScraping} />
 
-        {/* Scraping CLI Instruction */}
-        {scrapingMessage && (
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 space-y-3">
-            <p className="font-semibold text-blue-900">🔍 Jalankan Scraping dari Terminal</p>
-            <p className="text-sm text-blue-800">
-              Scraping membutuhkan Playwright browser yang berjalan di komputer lokal. Buka terminal dan jalankan:
-            </p>
-            <div className="bg-blue-950 text-blue-100 rounded-lg px-4 py-3 font-mono text-sm overflow-x-auto">
-              npm run scrape -- --keyword "{scrapingMessage.keyword}" --location "{scrapingMessage.location}" --max {scrapingMessage.maxResults}
+        {isScraping && (
+          <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 flex items-center gap-3">
+            <div className="bg-blue-100 p-2 rounded-lg">
+              <div className="w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
             </div>
-            <div className="flex gap-2">
-              <button
-                onClick={dismissScrapingMessage}
-                className="text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors cursor-pointer font-medium"
-              >
-                ✅ Sudah selesai, Refresh Data
-              </button>
-              <button
-                onClick={() => setScrapingMessage(null)}
-                className="text-sm text-blue-700 hover:text-blue-900 px-4 py-2 rounded-lg transition-colors cursor-pointer"
-              >
-                Tutup
-              </button>
+            <div>
+              <p className="font-semibold text-blue-900">Sedang Scraping...</p>
+              <p className="text-sm text-blue-700 mt-0.5">
+                Bot sedang mengekstrak data dari Google Maps. Proses ini bisa memakan waktu 1-5 menit tergantung jumlah leads.
+              </p>
             </div>
           </div>
         )}
@@ -161,7 +126,7 @@ const App = () => {
           />
         )}
 
-        {!isScraping && leads.length === 0 && !scrapingMessage && <EmptyState />}
+        {!isScraping && leads.length === 0 && <EmptyState />}
       </div>
     </div>
   );
