@@ -1,79 +1,107 @@
-const API_BASE = (import.meta.env.VITE_API_URL || 'http://localhost:3001') + '/api';
+import supabase from './supabase';
 
 /**
- * Fetch leads from the API
+ * Check if Supabase is connected
+ */
+export function isConnected() {
+    return !!supabase;
+}
+
+/**
+ * Fetch leads from Supabase
  */
 export async function fetchLeads({ status, website_status, search, page = 1, limit = 50 } = {}) {
-    const params = new URLSearchParams();
-    if (status) params.set('status', status);
-    if (website_status) params.set('website_status', website_status);
-    if (search) params.set('search', search);
-    params.set('page', page);
-    params.set('limit', limit);
+    if (!supabase) return { leads: [], total: 0, page, limit };
 
-    const res = await fetch(`${API_BASE}/leads?${params}`);
-    if (!res.ok) throw new Error('Failed to fetch leads');
-    return res.json();
+    let query = supabase.from('leads').select('*', { count: 'exact' });
+
+    if (status) query = query.eq('status', status);
+    if (website_status) query = query.eq('website_status', website_status);
+    if (search) query = query.or(`company_name.ilike.%${search}%,address.ilike.%${search}%`);
+
+    const offset = (page - 1) * limit;
+    query = query.order('scraped_at', { ascending: false });
+    query = query.range(offset, offset + limit - 1);
+
+    const { data, error, count } = await query;
+    if (error) throw error;
+
+    return { leads: data || [], total: count || 0, page, limit };
 }
 
 /**
  * Update lead status
  */
-export async function updateLeadStatus(id, status, note = '') {
-    const res = await fetch(`${API_BASE}/leads/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status, note }),
-    });
-    if (!res.ok) throw new Error('Failed to update lead');
-    return res.json();
+export async function updateLeadStatus(id, newStatus, note = '') {
+    if (!supabase) throw new Error('Not connected');
+
+    const { data, error } = await supabase
+        .from('leads')
+        .update({ status: newStatus })
+        .eq('id', id)
+        .select()
+        .single();
+    if (error) throw error;
+
+    // Add log entry if note provided
+    if (note) {
+        await supabase.from('lead_logs').insert({
+            lead_id: id,
+            note: `Status changed to "${newStatus}". ${note}`,
+        });
+    }
+
+    return data;
 }
 
 /**
  * Delete a lead
  */
 export async function deleteLead(id) {
-    const res = await fetch(`${API_BASE}/leads/${id}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error('Failed to delete lead');
-    return res.json();
+    if (!supabase) throw new Error('Not connected');
+
+    const { error } = await supabase.from('leads').delete().eq('id', id);
+    if (error) throw error;
+    return { message: 'Lead deleted' };
 }
 
 /**
- * Start a scraping job
+ * Export leads as CSV (client-side)
  */
-export async function startScraping(keyword, location, maxResults = 20) {
-    const res = await fetch(`${API_BASE}/scraper/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keyword, location, maxResults }),
-    });
-    if (!res.ok) throw new Error('Failed to start scraping');
-    return res.json();
-}
+export async function exportCSV({ status, website_status } = {}) {
+    let leads = [];
 
-/**
- * Check scraping job status
- */
-export async function checkJobStatus(jobId) {
-    const res = await fetch(`${API_BASE}/scraper/status/${jobId}`);
-    if (!res.ok) throw new Error('Failed to check job status');
-    return res.json();
-}
+    if (supabase) {
+        let query = supabase.from('leads').select('*');
+        if (status) query = query.eq('status', status);
+        if (website_status) query = query.eq('website_status', website_status);
+        query = query.order('scraped_at', { ascending: false });
 
-/**
- * Export leads as CSV (triggers download)
- */
-export function exportCSV({ status, website_status } = {}) {
-    const params = new URLSearchParams();
-    if (status) params.set('status', status);
-    if (website_status) params.set('website_status', website_status);
-    window.open(`${API_BASE}/export/csv?${params}`, '_blank');
-}
+        const { data, error } = await query;
+        if (error) throw error;
+        leads = data || [];
+    }
 
-/**
- * Health check
- */
-export async function healthCheck() {
-    const res = await fetch(`${API_BASE}/health`);
-    return res.json();
+    if (leads.length === 0) {
+        alert('Tidak ada data untuk di-export.');
+        return;
+    }
+
+    const headers = ['Nama Bisnis', 'Kategori', 'Alamat', 'No. Telepon', 'Website', 'Status Website', 'Google Maps', 'Status Prospek', 'Tanggal Scraping'];
+    const rows = leads.map(l => [
+        l.company_name, l.category, l.address, l.phone_number,
+        l.website_url || '', l.website_status, l.google_maps_url || '', l.status, l.scraped_at,
+    ]);
+    const csv = [
+        headers.join(','),
+        ...rows.map(r => r.map(c => `"${(c || '').replace(/"/g, '""')}"`).join(','))
+    ].join('\n');
+
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `leads-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
 }

@@ -5,11 +5,10 @@ import LeadsTable from './components/LeadsTable';
 import EmptyState from './components/EmptyState';
 import ScrapingProgress from './components/ScrapingProgress';
 import {
+  isConnected,
   fetchLeads,
   updateLeadStatus,
   deleteLead,
-  startScraping,
-  checkJobStatus,
   exportCSV,
 } from './lib/api';
 
@@ -18,20 +17,22 @@ const App = () => {
   const [isScraping, setIsScraping] = useState(false);
   const [showOnlyNoWebsite, setShowOnlyNoWebsite] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
-  const [jobId, setJobId] = useState(null);
-  const [jobStatus, setJobStatus] = useState(null);
-  const [apiConnected, setApiConnected] = useState(false);
+  const [dbConnected, setDbConnected] = useState(false);
   const [error, setError] = useState(null);
+  const [scrapingMessage, setScrapingMessage] = useState(null);
 
-  // Load leads from API on mount
+  // Load leads from Supabase on mount
   const loadLeads = useCallback(async () => {
     try {
+      const connected = isConnected();
+      setDbConnected(connected);
+      if (!connected) return;
+
       const data = await fetchLeads();
       setLeads(data.leads || []);
-      setApiConnected(true);
-    } catch {
-      setApiConnected(false);
-      console.log('⚠️ Backend not connected. Running in mock mode.');
+    } catch (err) {
+      console.error('Error loading leads:', err);
+      setError('Gagal memuat data leads.');
     }
   }, []);
 
@@ -39,108 +40,54 @@ const App = () => {
     loadLeads();
   }, [loadLeads]);
 
-  // Poll job status when scraping
-  useEffect(() => {
-    if (!jobId || jobStatus === 'completed' || jobStatus === 'failed') return;
-
-    const interval = setInterval(async () => {
-      try {
-        const job = await checkJobStatus(jobId);
-        setJobStatus(job.status);
-
-        if (job.status === 'completed') {
-          setIsScraping(false);
-          loadLeads(); // Reload leads from API
-          setTimeout(() => {
-            setJobId(null);
-            setJobStatus(null);
-          }, 3000);
-        } else if (job.status === 'failed') {
-          setIsScraping(false);
-          setError(job.error || 'Scraping failed');
-        }
-      } catch {
-        // API not available
-      }
-    }, 2000);
-
-    return () => clearInterval(interval);
-  }, [jobId, jobStatus, loadLeads]);
-
-  // Handle scraping
+  // Handle scraping — triggers local CLI reminder
   const handleScrape = async (keyword, location, maxResults = 40) => {
-    setIsScraping(true);
-    setError(null);
-    setJobStatus(null);
+    setScrapingMessage({ keyword, location, maxResults });
+  };
 
-    if (apiConnected) {
-      try {
-        const result = await startScraping(keyword, location, maxResults);
-        setJobId(result.jobId);
-        setJobStatus('running');
-      } catch {
-        setError('Gagal memulai scraping. Pastikan backend berjalan.');
-        setIsScraping(false);
-      }
-    } else {
-      // Mock mode for development without backend
-      setTimeout(() => {
-        const mockData = [
-          { id: `mock-${Date.now()}-1`, company_name: `${keyword} Jaya Abadi`, category: keyword, address: `Jl. Ahmad Yani No. 10, ${location}`, phone_number: '081234567890', website_url: null, website_status: 'none', google_maps_url: '#', status: 'new', scraped_at: new Date().toISOString() },
-          { id: `mock-${Date.now()}-2`, company_name: `${keyword} Makmur ${location}`, category: keyword, address: `Jl. Sudirman 45, ${location}`, phone_number: '085678901234', website_url: 'https://bengkelmakmur.com', website_status: 'active', google_maps_url: '#', status: 'new', scraped_at: new Date().toISOString() },
-          { id: `mock-${Date.now()}-3`, company_name: `Karya ${keyword} Bersama`, category: keyword, address: `Kawasan Industri Rungkut, ${location}`, phone_number: '089912345678', website_url: null, website_status: 'none', google_maps_url: '#', status: 'contacted', scraped_at: new Date().toISOString() },
-          { id: `mock-${Date.now()}-4`, company_name: `Sumber ${keyword}`, category: keyword, address: `Jl. Diponegoro 12, ${location}`, phone_number: '081122334455', website_url: 'http://sumber-las-sby.co.id', website_status: 'dead', google_maps_url: '#', status: 'new', scraped_at: new Date().toISOString() },
-          { id: `mock-${Date.now()}-5`, company_name: `${keyword} Pak Kumis`, category: keyword, address: `Pasar Lama ${location}`, phone_number: '', website_url: null, website_status: 'none', google_maps_url: '#', status: 'rejected', scraped_at: new Date().toISOString() },
-        ];
-        setLeads(prev => [...mockData, ...prev]);
-        setIsScraping(false);
-      }, 2000);
-    }
+  const dismissScrapingMessage = () => {
+    setScrapingMessage(null);
+    loadLeads(); // Reload data after user runs CLI
   };
 
   // Handle status change
   const handleStatusChange = async (id, newStatus) => {
-    if (apiConnected) {
+    // Optimistic update
+    setLeads(leads.map(lead => lead.id === id ? { ...lead, status: newStatus } : lead));
+
+    if (dbConnected) {
       try {
         await updateLeadStatus(id, newStatus);
       } catch {
         console.error('Failed to update status');
+        loadLeads(); // Revert on error
       }
     }
-    setLeads(leads.map(lead => lead.id === id ? { ...lead, status: newStatus } : lead));
   };
 
   // Handle delete
   const handleDelete = async (id) => {
-    if (apiConnected) {
+    setLeads(leads.filter(lead => lead.id !== id));
+
+    if (dbConnected) {
       try {
         await deleteLead(id);
       } catch {
         console.error('Failed to delete lead');
+        loadLeads(); // Revert on error
       }
     }
-    setLeads(leads.filter(lead => lead.id !== id));
   };
 
   // Handle export
-  const handleExport = () => {
-    if (apiConnected) {
-      exportCSV({ website_status: showOnlyNoWebsite ? 'none' : undefined });
-    } else {
-      // Fallback: create CSV client-side
-      const headers = ['Nama Bisnis', 'Kategori', 'Alamat', 'No. Telepon', 'Website', 'Status Website', 'Status Prospek'];
-      const rows = filteredLeads.map(l => [
-        l.company_name, l.category, l.address, l.phone_number,
-        l.website_url || '', l.website_status, l.status,
-      ]);
-      const csv = [headers.join(','), ...rows.map(r => r.map(c => `"${(c || '').replace(/"/g, '""')}"`).join(','))].join('\n');
-      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `leads-${new Date().toISOString().slice(0, 10)}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
+  const handleExport = async () => {
+    try {
+      await exportCSV({
+        website_status: showOnlyNoWebsite ? 'none' : undefined,
+        status: statusFilter || undefined,
+      });
+    } catch (err) {
+      setError('Gagal export CSV: ' + err.message);
     }
   };
 
@@ -159,19 +106,45 @@ const App = () => {
 
         <Header leadsCount={leads.length} onExport={handleExport} />
 
-        {/* API Status Indicator */}
+        {/* DB Status Indicator */}
         <div className="flex items-center gap-2 text-xs text-gray-500">
-          <span className={`w-2 h-2 rounded-full ${apiConnected ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
-          {apiConnected ? 'Terhubung ke API' : 'Mode Offline (Mock Data)'}
+          <span className={`w-2 h-2 rounded-full ${dbConnected ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
+          {dbConnected ? `Terhubung ke Database — ${leads.length} leads tersimpan` : 'Database tidak terhubung'}
         </div>
 
         <SearchForm onSearch={handleScrape} isScraping={isScraping} />
 
-        <ScrapingProgress jobId={jobId} status={jobStatus} />
+        {/* Scraping CLI Instruction */}
+        {scrapingMessage && (
+          <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 space-y-3">
+            <p className="font-semibold text-blue-900">🔍 Jalankan Scraping dari Terminal</p>
+            <p className="text-sm text-blue-800">
+              Scraping membutuhkan Playwright browser yang berjalan di komputer lokal. Buka terminal dan jalankan:
+            </p>
+            <div className="bg-blue-950 text-blue-100 rounded-lg px-4 py-3 font-mono text-sm overflow-x-auto">
+              npm run scrape -- --keyword "{scrapingMessage.keyword}" --location "{scrapingMessage.location}" --max {scrapingMessage.maxResults}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={dismissScrapingMessage}
+                className="text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors cursor-pointer font-medium"
+              >
+                ✅ Sudah selesai, Refresh Data
+              </button>
+              <button
+                onClick={() => setScrapingMessage(null)}
+                className="text-sm text-blue-700 hover:text-blue-900 px-4 py-2 rounded-lg transition-colors cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        )}
 
         {error && (
-          <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">
-            ❌ {error}
+          <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700 flex justify-between items-center">
+            <span>❌ {error}</span>
+            <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700 cursor-pointer">✕</button>
           </div>
         )}
 
@@ -188,7 +161,7 @@ const App = () => {
           />
         )}
 
-        {!isScraping && leads.length === 0 && <EmptyState />}
+        {!isScraping && leads.length === 0 && !scrapingMessage && <EmptyState />}
       </div>
     </div>
   );

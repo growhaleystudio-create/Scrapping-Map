@@ -4,12 +4,11 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n FE,BE -c cyan,green \"vite\" \"node server/index.js\"",
-    "dev:fe": "vite",
-    "dev:be": "node server/index.js",
+    "dev": "vite",
     "build": "vite build",
+    "preview": "vite preview",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "scrape": "node scripts/scrape.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.98.0",
